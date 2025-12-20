@@ -31,7 +31,6 @@ CUSTOM_CSS = """
 }
 html, body, [class*="css"]  { background-color: var(--bg) !important; color: #e7eefc !important; }
 .block-container { padding-top: 1.1rem; padding-bottom: 2rem; max-width: 560px; }
-h1,h2,h3 { letter-spacing: -0.02em; }
 .card {
   background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.00));
   border: 1px solid var(--line);
@@ -52,9 +51,8 @@ hr { border: none; border-top: 1px solid var(--line); margin: 12px 0; }
 .bad { color: var(--bad); }
 .gray { color: var(--gray); }
 .bigscore {
-  font-size: 72px; font-weight: 850; line-height: 1; letter-spacing:-0.04em;
+  font-size: 78px; font-weight: 900; line-height: 1; letter-spacing:-0.04em;
 }
-.scoreArrow { font-size: 56px; font-weight: 800; line-height:1; color: var(--muted); padding: 0 10px; }
 .footer { color: var(--muted); font-size: 11px; opacity: 0.92; margin-top: 6px; }
 </style>
 """
@@ -82,7 +80,8 @@ def rsi(close: pd.Series, n: int = 14) -> pd.Series:
     avg_gain = gain.ewm(alpha=1/n, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1/n, adjust=False).mean()
     rs = avg_gain / (avg_loss.replace(0, np.nan))
-    return 100 - (100 / (1 + rs))
+    out = 100 - (100 / (1 + rs))
+    return out.clip(0, 100)
 
 def true_range(df: pd.DataFrame) -> pd.Series:
     prev_close = df["Close"].shift(1)
@@ -103,15 +102,20 @@ def obv(df: pd.DataFrame) -> pd.Series:
     direction = np.sign(df["Close"].diff()).fillna(0)
     return (direction * df["Volume"].fillna(0)).cumsum()
 
+# ✅ FIXED MFI (0~100 보장, 음수/이상치 제거)
 def mfi(df: pd.DataFrame, n: int = 14) -> pd.Series:
     tp = (df["High"] + df["Low"] + df["Close"]) / 3.0
     mf = tp * df["Volume"].fillna(0)
+
     pos = mf.where(tp.diff() > 0, 0.0)
     neg = mf.where(tp.diff() < 0, 0.0)
+
     pmf = pos.rolling(n).sum()
-    nmf = (-neg).rolling(n).sum()
+    nmf = neg.abs().rolling(n).sum()
+
     mfr = pmf / (nmf.replace(0, np.nan))
-    return 100 - (100 / (1 + mfr))
+    out = 100 - (100 / (1 + mfr))
+    return out.clip(0, 100)
 
 def bbands(close: pd.Series, n: int = 20, k: float = 2.0):
     mid = close.rolling(n).mean()
@@ -134,7 +138,7 @@ def money(x: float) -> str:
     return f"${x:,.2f}"
 
 def grade_from_score(score: int) -> str:
-    # 더 공격적 (상위 등급 좁힘)
+    # 공격적(상위 등급 좁힘)
     if score >= 92: return "SSS"
     if score >= 84: return "SS"
     if score >= 75: return "S"
@@ -143,12 +147,12 @@ def grade_from_score(score: int) -> str:
     if score >= 40: return "C"
     return "D"
 
+# ✅ 더 공격적인 색 기준
 def score_class_for_ui(score: int) -> str:
-    # SSS=핑크/보라, A~B=초록/노랑, 관망/약함=회색
-    if score >= 92: return "pink"
-    if score >= 75: return "good"
-    if score >= 52: return "warn"
-    return "gray"
+    if score >= 88: return "pink"   # SS~SSS
+    if score >= 72: return "good"   # S~A
+    if score >= 55: return "warn"   # B
+    return "gray"                   # 관망
 
 def vix_warning(vix: Optional[float]) -> Optional[str]:
     if vix is None or (isinstance(vix, float) and math.isnan(vix)):
@@ -215,27 +219,26 @@ def sparkline_figure(df: pd.DataFrame, title: str):
     return fig
 
 # =============================
-# “쓸데없는 점수 제거” 실전형 스코어
+# 실전형 스코어 (핵심만)
 # =============================
 def compute_score(df: pd.DataFrame) -> Tuple[int, dict]:
     close = df["Close"]
     last = float(close.iloc[-1])
 
-    ma20 = sma(close, 20).iloc[-1]
-    ma50 = sma(close, 50).iloc[-1]
-    ma200 = sma(close, 200).iloc[-1] if len(df) >= 200 else sma(close, 100).iloc[-1]
+    ma20 = float(sma(close, 20).iloc[-1])
+    ma50 = float(sma(close, 50).iloc[-1])
+    ma200 = float(sma(close, 200).iloc[-1]) if len(df) >= 200 else float(sma(close, 100).iloc[-1])
 
     r = float(rsi(close, 14).iloc[-1])
     mf = float(mfi(df, 14).iloc[-1])
     a = float(atr(df, 14).iloc[-1])
     atr_pct = (a / last) if last else 0.0
 
-    # Volume confirmation: 최근 거래량이 평균보다 늘면 가점
     vol_now = float(df["Volume"].tail(20).mean())
     vol_base = float(df["Volume"].tail(80).mean()) if len(df) >= 80 else float(df["Volume"].mean())
     vol_ratio = (vol_now / vol_base) if vol_base else 1.0
 
-    # 1) Trend (핵심)
+    # Trend
     trend = 0
     trend += 12 if last > ma20 else 0
     trend += 14 if last > ma50 else 0
@@ -243,7 +246,7 @@ def compute_score(df: pd.DataFrame) -> Tuple[int, dict]:
     trend += 8 if ma20 > ma50 else 0
     trend += 10 if ma50 > ma200 else 0
 
-    # 2) Momentum (RSI)
+    # Momentum (RSI)
     mom = 0
     if r < 30: mom += 20
     elif r < 40: mom += 14
@@ -252,7 +255,7 @@ def compute_score(df: pd.DataFrame) -> Tuple[int, dict]:
     elif r < 75: mom += 4
     else: mom += 1
 
-    # 3) Money flow (MFI)
+    # Money flow (MFI)
     flow = 0
     if mf < 20: flow += 12
     elif mf < 40: flow += 9
@@ -260,51 +263,28 @@ def compute_score(df: pd.DataFrame) -> Tuple[int, dict]:
     elif mf < 80: flow += 4
     else: flow += 1
 
-    # 4) Volatility filter
+    # Volatility filter
     vol = 0
     if atr_pct < 0.012: vol += 12
     elif atr_pct < 0.025: vol += 9
     elif atr_pct < 0.045: vol += 5
     else: vol += 2
 
-    # 5) Volume confirmation
+    # Volume confirmation
     vol_conf = 0
     if vol_ratio >= 1.3: vol_conf += 10
     elif vol_ratio >= 1.1: vol_conf += 7
     elif vol_ratio >= 0.9: vol_conf += 5
     else: vol_conf += 3
 
-    score = trend + mom + flow + vol + vol_conf
-    score = clamp_int(score, 0, 100)
+    score = clamp_int(trend + mom + flow + vol + vol_conf, 0, 100)
 
     explain = dict(
-        last=last, ma20=float(ma20), ma50=float(ma50), ma200=float(ma200),
-        rsi=r, mfi=mf, atr=a, atr_pct=atr_pct, vol_ratio=float(vol_ratio)
+        last=last, ma20=ma20, ma50=ma50, ma200=ma200,
+        rsi=r, mfi=mf, atr=a, atr_pct=atr_pct, vol_ratio=vol_ratio,
+        trend=trend, mom=mom, flow=flow, vol=vol, vol_conf=vol_conf
     )
     return score, explain
-
-def next_score_projection(df: pd.DataFrame, score_now: int) -> int:
-    # 과대예측 금지: 최근 모멘텀/추세 약화 중심으로만 드리프트
-    close = df["Close"]
-    if len(df) < 40:
-        return score_now
-
-    r = rsi(close, 14)
-    r_now = float(r.iloc[-1])
-    r_prev = float(r.iloc[-8])
-    r_chg = r_now - r_prev
-
-    ma20 = sma(close, 20)
-    below20 = float(close.iloc[-1]) < float(ma20.iloc[-1])
-
-    drift = 0
-    if r_chg < -8: drift -= 18
-    elif r_chg < -4: drift -= 10
-    elif r_chg > 8: drift += 8
-    elif r_chg > 4: drift += 5
-
-    drift += (-6 if below20 else 2)
-    return clamp_int(score_now + drift, 0, 100)
 
 # =============================
 # Labels
@@ -360,18 +340,14 @@ def label_pattern(df: pd.DataFrame) -> str:
 # Target / Stop (TF + style 반영)
 # =============================
 def calc_target_stop(df: pd.DataFrame, style: str, tf_choice: str) -> Tuple[float, float]:
-    """
-    스타일(단타/스윙) + 타임프레임별로 ATR 배수 조정.
-    - 15m는 더 촘촘, 1h는 중간, 1d는 넓게
-    """
     last = float(df["Close"].iloc[-1])
     a = float(atr(df, 14).iloc[-1])
     support, resistance = pivot_levels(df, 60)
 
-    # TF multiplier
-    if "15m" in TF_OPTIONS[tf_choice]["interval"]:
+    interval = TF_OPTIONS[tf_choice]["interval"]
+    if interval == "15m":
         tf_stop_mul, tf_tgt_mul = 0.9, 1.4
-    elif "1h" in TF_OPTIONS[tf_choice]["interval"]:
+    elif interval == "1h":
         tf_stop_mul, tf_tgt_mul = 1.0, 1.6
     else:  # 1d
         tf_stop_mul, tf_tgt_mul = 1.2, 2.2
@@ -388,38 +364,88 @@ def calc_target_stop(df: pd.DataFrame, style: str, tf_choice: str) -> Tuple[floa
     return float(stop), float(target)
 
 # =============================
-# Final action line (실전용)
+# 최종 전략 라인
 # =============================
-def final_action_line(score_next: int, bias: str, rsi_val: float, vix: Optional[float], last_price: float, ma20: float, tf_label: str) -> str:
+def final_action_line(score: int, bias: str, rsi_val: float, vix: Optional[float], last_price: float, ma20: float, tf_label: str) -> str:
     trend_up = ("상승" in bias)
     vix_high = (vix is not None and vix >= 25)
 
-    # 강한 추세 + 무리 없는 RSI + MA20 위 + VIX 안정
-    if score_next >= 84 and trend_up and last_price >= ma20 and rsi_val <= 68 and not vix_high:
+    if score >= 84 and trend_up and last_price >= ma20 and rsi_val <= 68 and not vix_high:
         return f"▶ 전략: 추세 추종 진입(분할) / 손절 엄수 · {tf_label}"
 
-    # 과매도 반등
-    if rsi_val < 35 and score_next >= 63:
+    if rsi_val < 35 and score >= 63:
         return f"▶ 전략: 단기 반등 노림(분할) / 빠른 익절 우선 · {tf_label}"
 
-    # 변동성 경고
     if vix_high:
         return f"▶ 전략: 변동성 주의(포지션 축소) / 무리한 추격금지 · {tf_label}"
 
-    # 관망
-    if score_next < 52 or (last_price < ma20 and rsi_val < 45):
+    if score < 52 or (last_price < ma20 and rsi_val < 45):
         return f"▶ 전략: 관망(추격금지) / 지지 확인 후 접근 · {tf_label}"
 
     return f"▶ 전략: 눌림 대기 후 분할매수 / 손절 엄수 · {tf_label}"
+
+# =============================
+# 점수 이유(한 줄) — “왜 이 점수인지”
+# =============================
+def score_reason_one_line(ex: dict) -> str:
+    last = ex["last"]; ma20 = ex["ma20"]; ma50 = ex["ma50"]; ma200 = ex["ma200"]
+    r = ex["rsi"]; mf = ex["mfi"]; atr_pct = ex["atr_pct"]; vr = ex["vol_ratio"]
+
+    parts = []
+
+    # Trend 요약
+    if last > ma20 and last > ma50 and last > ma200:
+        parts.append("추세 강함(주요 MA 상단)")
+    elif last < ma20 and last < ma50:
+        parts.append("추세 약함(MA 하단)")
+    else:
+        parts.append("추세 혼합(경계 구간)")
+
+    # Momentum 요약
+    if r < 35:
+        parts.append("RSI 과매도(반등 여지)")
+    elif r < 55:
+        parts.append("RSI 중립(확신 낮음)")
+    elif r < 70:
+        parts.append("RSI 양호(모멘텀 유지)")
+    else:
+        parts.append("RSI 과열(추격 주의)")
+
+    # Flow 요약
+    if mf < 30:
+        parts.append("MFI 낮음(자금 유입 약)")
+    elif mf < 70:
+        parts.append("MFI 보통(수급 중립)")
+    else:
+        parts.append("MFI 높음(수급 강)")
+
+    # Volatility 요약
+    if atr_pct >= 0.045:
+        parts.append("변동성 큼(신호 신뢰↓)")
+    elif atr_pct >= 0.025:
+        parts.append("변동성 보통")
+    else:
+        parts.append("변동성 낮음(세팅 유리)")
+
+    # Volume confirmation
+    if vr >= 1.3:
+        parts.append("거래량 확인(강)")
+    elif vr >= 1.1:
+        parts.append("거래량 확인(보통)")
+    else:
+        parts.append("거래량 약함")
+
+    # 너무 길지 않게 3~4개로 제한
+    return "점수 이유: " + " · ".join(parts[:4])
 
 # =============================
 # Signal model
 # =============================
 @dataclass
 class Signal:
-    score_now: int
-    score_next: int
+    score: int
     grade: str
+    score_reason: str
     bias: str
     wave: str
     energy: str
@@ -434,15 +460,15 @@ class Signal:
     vix_text: Optional[str]
     asof: str
 
-def build_signal(ticker: str, style: str, tf_choice: str) -> Optional[Signal]:
+def build_signal(ticker: str, style: str, tf_choice: str) -> Optional[Tuple[Signal, pd.DataFrame, dict]]:
     tf = TF_OPTIONS[tf_choice]
     df = fetch_ohlcv(ticker, period=tf["period"], interval=tf["interval"])
     if df is None or df.empty or len(df) < tf["min_bars"]:
         return None
 
-    score_now, ex = compute_score(df)
-    score_next = next_score_projection(df, score_now)
-    grade = grade_from_score(score_next)
+    score, ex = compute_score(df)
+    grade = grade_from_score(score)
+    reason = score_reason_one_line(ex)
 
     close = float(df["Close"].iloc[-1])
     ma50 = float(sma(df["Close"], 50).iloc[-1])
@@ -459,14 +485,14 @@ def build_signal(ticker: str, style: str, tf_choice: str) -> Optional[Signal]:
     energy, obv_ratio = label_energy(df)
     pattern = label_pattern(df)
 
-    # 1W 성과: TF에 따라 “대략 1주” 길이 다르게
     interval = tf["interval"]
     if interval == "1d":
         steps = 5
     elif interval == "1h":
-        steps = 6 * 5  # 대략 6시간*5일(대략치)
-    else:  # 15m
-        steps = 26 * 5  # 장중 15m bar 대략치
+        steps = 6 * 5
+    else:
+        steps = 26 * 5
+
     if len(df) > steps:
         weekly_perf = (float(df["Close"].iloc[-1]) / float(df["Close"].iloc[-(steps+1)]) - 1.0) * 100
     else:
@@ -476,13 +502,12 @@ def build_signal(ticker: str, style: str, tf_choice: str) -> Optional[Signal]:
 
     vix = fetch_vix()
     vix_text = vix_warning(vix)
-
     asof = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    return Signal(
-        score_now=score_now,
-        score_next=score_next,
+    sig = Signal(
+        score=score,
         grade=grade,
+        score_reason=reason,
         bias=bias,
         wave=wave,
         energy=energy,
@@ -497,6 +522,7 @@ def build_signal(ticker: str, style: str, tf_choice: str) -> Optional[Signal]:
         vix_text=vix_text,
         asof=asof
     )
+    return sig, df, ex
 
 # =============================
 # UI
@@ -519,17 +545,13 @@ if not ticker:
     st.stop()
 
 ticker = ticker.strip().upper()
-tf = TF_OPTIONS[tf_choice]
-df = fetch_ohlcv(ticker, period=tf["period"], interval=tf["interval"])
-if df is None or df.empty:
-    st.error("데이터를 불러오지 못했어요. 티커를 확인하거나 잠시 후 다시 시도해줘.")
+
+result = build_signal(ticker, style, tf_choice)
+if result is None:
+    st.error(f"데이터가 부족하거나 티커를 불러오지 못했어요. ({tf_choice}) 다른 타임프레임으로 바꿔보거나 잠시 후 다시 시도해줘.")
     st.stop()
 
-sig = build_signal(ticker, style, tf_choice)
-if sig is None:
-    st.error(f"데이터가 부족해요. ({tf_choice}) 다른 타임프레임으로 바꿔보거나 잠시 후 다시 시도해줘.")
-    st.stop()
-
+sig, df, ex = result
 last_price = float(df["Close"].iloc[-1])
 ma20_ui = float(sma(df["Close"], 20).iloc[-1])
 
@@ -551,27 +573,28 @@ st.markdown(f"<div style='text-align:center; font-size:40px; font-weight:900;' c
 st.markdown(f"<div style='text-align:center; font-size:20px; font-weight:750;'>{ticker} <span class='subtle'> {money(last_price)}</span></div>", unsafe_allow_html=True)
 st.plotly_chart(sparkline_figure(df, f"Price · {tf_choice} · MA10 · Volume"), use_container_width=True)
 
-# Score block
-cls_now = score_class_for_ui(sig.score_now)
-cls_next = score_class_for_ui(sig.score_next)
-
+# ✅ 점수는 “하나만”
+cls = score_class_for_ui(sig.score)
 st.markdown(
     f"""
-<div style="text-align:center; margin-top:2px;">
+<div style="text-align:center; margin-top:6px;">
   <div class="subtle">AI 추천 점수</div>
-  <div style="display:flex; justify-content:center; align-items:baseline; gap:10px;">
-    <div class="bigscore {cls_now}">{sig.score_now}</div>
-    <div class="scoreArrow">→</div>
-    <div class="bigscore {cls_next}">{sig.score_next}</div>
-  </div>
+  <div class="bigscore {cls}">{sig.score}</div>
   <div class="subtle">등급 [{sig.grade}]</div>
 </div>
 """,
     unsafe_allow_html=True,
 )
 
+# ✅ 점수 이유 한 줄
+st.markdown(
+    f"<div class='small' style='text-align:center; margin-top:6px;'>{sig.score_reason}</div>",
+    unsafe_allow_html=True
+)
+
+# 전략 한 줄
 action = final_action_line(
-    score_next=sig.score_next,
+    score=sig.score,
     bias=sig.bias,
     rsi_val=sig.rsi,
     vix=sig.vix,
@@ -637,20 +660,19 @@ with st.expander("여러 티커 빠른 스캔(옵션)"):
     tickers = [t.strip().upper() for t in tickers_raw.replace("\n", ",").split(",") if t.strip()]
     if st.button("스캔 실행"):
         rows = []
+        tf = TF_OPTIONS[tf_choice]
         for t in tickers[:30]:
-            s = build_signal(t, style, tf_choice)
-            if not s:
+            res = build_signal(t, style, tf_choice)
+            if not res:
                 continue
-            d = fetch_ohlcv(t, period=tf["period"], interval=tf["interval"])
-            if d is None or d.empty:
-                continue
+            s, d, _ = res
             last = float(d["Close"].iloc[-1])
             up = (s.target/last - 1)*100
             dn = (s.stop/last - 1)*100
-            rows.append([t, last, s.score_now, s.score_next, s.grade, up, dn])
+            rows.append([t, last, s.score, s.grade, up, dn])
         if rows:
-            out = pd.DataFrame(rows, columns=["Ticker","Last","ScoreNow","ScoreNext","Grade","Target%","Stop%"])
-            out = out.sort_values("ScoreNext", ascending=False)
+            out = pd.DataFrame(rows, columns=["Ticker","Last","Score","Grade","Target%","Stop%"])
+            out = out.sort_values("Score", ascending=False)
             st.dataframe(out, use_container_width=True, hide_index=True)
         else:
             st.info("스캔 결과가 없어요. (데이터 부족/티커 확인)")
